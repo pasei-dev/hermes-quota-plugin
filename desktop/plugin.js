@@ -50,7 +50,7 @@ const ID = "quota";
 // gateway, so the two halves can really be different builds. `tests/test_widget_version.py`
 // fails when they drift; a mismatch found at runtime is surfaced in the pane
 // instead of looking like a broken feature.
-const WIDGET_VERSION = "2.4.1";
+const WIDGET_VERSION = "2.5.0";
 
 // Module-level ctx handle (set in register). The data hook below needs it.
 let CTX = null;
@@ -181,7 +181,7 @@ const statusbarModeAtom = atom(STATUSBAR_MODE_DEFAULT);
 // paneDetail: 'dense' shows every window, reset time and detail line per
 // provider; 'clean' collapses to just the percentage bars (label + % left).
 const PANE_DETAIL_KEY = "paneDetail";
-const PANE_DETAIL_DEFAULT = "dense";
+const PANE_DETAIL_DEFAULT = "clean";
 
 const paneDetailAtom = atom(PANE_DETAIL_DEFAULT);
 
@@ -944,11 +944,12 @@ function StatusBar() {
 
 // ---- pane -----------------------------------------------------------------
 
-function QuotaBar({ value, tone }) {
+function QuotaBar({ value, tone, compact = false }) {
 	const pct = Math.max(0, Math.min(100, value == null ? 0 : value));
 	return jsx("div", {
-		className:
-			"h-2 w-full overflow-hidden rounded-full bg-(--ui-stroke-secondary)",
+		className: compact
+			? "h-1.5 w-full overflow-hidden rounded-full bg-(--ui-stroke-secondary)"
+			: "h-2 w-full overflow-hidden rounded-full bg-(--ui-stroke-secondary)",
 		children: jsx("div", {
 			className: "h-full rounded-full transition-all",
 			style: { width: `${pct}%`, background: toneColor(tone) },
@@ -965,7 +966,15 @@ function ProviderRow({ id, provider }) {
 	// 'dense' = every window, reset time and detail line; 'clean' = just the
 	// percentage bars (label + % left), no resets/details.
 	const paneDetail = useValue(paneDetailAtom);
-	const dense = paneDetail !== "clean";
+	const dense = paneDetail === "dense";
+
+	// The key that owns a window rides in the label ("Monthly · pasei"). With
+	// more than one key shown, split the label so window and key render as two
+	// visual chunks — window in the row, key as a mid-contrast suffix.
+	const splitWindowLabel = (label) => {
+		const i = label.lastIndexOf(" · ");
+		return i < 0 ? null : [label.slice(0, i), label.slice(i + 3)];
+	};
 	const reason = provider.unavailable_reason;
 	const details = provider.details || [];
 	const displayName = providerMeta(id).name;
@@ -1014,14 +1023,14 @@ function ProviderRow({ id, provider }) {
 
 	return jsxs("div", {
 		className:
-			"flex flex-col gap-2 rounded-lg border border-(--ui-stroke-secondary) bg-(--ui-bg-elevated) px-3 py-2.5",
+			"flex flex-col gap-1.5 rounded-lg border border-(--ui-stroke-secondary) bg-(--ui-bg-elevated) px-2.5 py-2",
 		children: [
 			jsxs("div", {
 				className: "flex items-center justify-between gap-2",
 				children: [
 					jsxs("span", {
 						className:
-							"flex items-center gap-2 text-sm font-semibold text-(--ui-text-primary)",
+							"flex items-center gap-1.5 text-xs font-semibold text-(--ui-text-primary)",
 						children: [
 							jsx(ProviderBadge, { pid: id }),
 							displayName,
@@ -1036,7 +1045,7 @@ function ProviderRow({ id, provider }) {
 					provider.plan
 						? jsx("span", {
 								className:
-									"rounded bg-(--ui-control-hover-background) px-1.5 py-0.5 text-[0.6875rem] font-medium text-(--ui-text-secondary)",
+									"rounded bg-(--ui-control-hover-background) px-1.5 py-0 text-[0.625rem] font-medium text-(--ui-text-secondary)",
 								children: provider.plan,
 							})
 						: null,
@@ -1045,26 +1054,38 @@ function ProviderRow({ id, provider }) {
 			...windows.map((w, i) => {
 				const r = remainingPct(w);
 				const tone = toneForRemaining(r);
+				const parts = splitWindowLabel(w.label || "");
+				const keyName = parts ? parts[1] : null;
+				const winLabel = parts ? parts[0] : w.label || "window";
 				return jsxs(
 					"div",
 					{
-						className: "flex flex-col gap-1",
+						className: "flex flex-col gap-0.5",
 						children: [
 							jsxs("div", {
-								className: "flex items-center justify-between gap-2 text-xs",
+								className: "flex items-center justify-between gap-2 text-[0.6875rem]",
 								children: [
-									jsx("span", {
-										className: "text-(--ui-text-secondary)",
-										children: w.label || "window",
+									jsxs("span", {
+										className: "min-w-0 truncate text-(--ui-text-secondary)",
+										title: w.label || "",
+										children: [
+											winLabel,
+											keyName
+												? jsx("span", {
+														className: "text-(--ui-text-quaternary)",
+														children: `  ${keyName}`,
+													})
+												: null,
+										],
 									}),
 									jsx("span", {
-										className: "tabular-nums text-[0.8125rem] font-medium",
+										className: "tabular-nums text-xs font-medium",
 										style: { color: toneColor(tone) },
 										children: r == null ? "—" : `${r}% left`,
 									}),
 								],
 							}),
-							jsx(QuotaBar, { value: r, tone }),
+							jsx(QuotaBar, { value: r, tone, compact: true }),
 							dense && w.reset_at
 								? jsx("div", {
 										className: "text-[0.6875rem] text-(--ui-text-quaternary)",
@@ -1375,7 +1396,11 @@ function QuotaPane() {
 		onSuccess: () => qc.invalidateQueries({ queryKey: ["quota", "widget"] }),
 	});
 
+	// Compact header: title on the left, data age as a tiny muted suffix on
+	// the right (moved from the old bottom footer line, which overlapped the
+	// pane at small sizes). Backend reports the age; the ticker keeps it live.
 	const headerTitle = view === "settings" ? t("settingsTitle") : t("paneTitle");
+	const headerAge = view === "settings" ? null : ageSeconds == null ? null : formatAgeSeconds(ageSeconds);
 
 	let body;
 	if (view === "settings") {
@@ -1440,14 +1465,25 @@ function QuotaPane() {
 	}
 
 	return jsxs("div", {
-		className: "flex h-full flex-col gap-2 p-3",
+		className: "flex h-full flex-col gap-1.5 p-2.5",
 		children: [
 			jsxs("div", {
-				className: "flex items-center justify-between",
+				className: "flex items-center justify-between gap-2",
 				children: [
-					jsx("div", {
-						className: "text-sm font-medium",
-						children: headerTitle,
+					jsxs("div", {
+						className: "flex min-w-0 items-baseline gap-1.5",
+						children: [
+							jsx("div", {
+								className: "text-xs font-medium truncate",
+								children: headerTitle,
+							}),
+							headerAge
+								? jsx("span", {
+										className: "shrink-0 text-[0.625rem] text-(--ui-text-quaternary)",
+										children: headerAge,
+									})
+								: null,
+						],
 					}),
 					jsxs("div", {
 						className: "flex items-center gap-1",
@@ -1515,19 +1551,6 @@ function QuotaPane() {
 			jsx("div", { className: "min-h-0 flex-1", children: body }),
 			jsx(UpdateBanner, { update }),
 			versionSkew,
-			data && data.fetched_at
-				? jsx("div", {
-						className: "pt-2 text-[0.6875rem] text-(--ui-text-quaternary)",
-						children:
-							t(
-								"fetched",
-								absoluteReset(data.fetched_at) || data.fetched_at,
-							) +
-							(ageSeconds == null
-								? ""
-								: ` · ${t("fetchedAge", formatAgeSeconds(ageSeconds), pollSeconds)}`),
-					})
-				: null,
 		],
 	});
 }

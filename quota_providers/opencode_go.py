@@ -426,11 +426,68 @@ def fetch_usage(
     return QuotaResult(label=_PROVIDER_ID, windows=windows, plan=plan, unavailable_reason=None)
 
 
+def _pool_entries() -> list[tuple[str, str]]:
+    """All opencode-go keys Hermes rotates across, most-preferred first.
+
+    Source of truth is the active Hermes home's ``auth.json`` →
+    ``credential_pool["opencode-go"]`` (the same entries round-robin rotation
+    draws from). Each entry contributes ``(access_token, label)``. Falls back
+    to the single-key resolution (env / OpenCode auth file) when the pool is
+    absent, empty, or unreadable, so a plain install keeps working.
+    """
+    keys: list[tuple[str, str]] = []
+    try:
+        from hermes_constants import get_hermes_home
+
+        path = os.path.join(str(get_hermes_home()), "auth.json")
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        entries = (data.get("credential_pool") or {}).get(_PROVIDER_ID) or []
+        seen: set[str] = set()
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            token = entry.get("access_token")
+            if not isinstance(token, str) or not token.strip() or token in seen:
+                continue
+            seen.add(token)
+            label = str(entry.get("label") or entry.get("id") or "")
+            label = label.split("@")[0][:14] or f"key{len(keys) + 1}"
+            keys.append((token.strip(), label))
+    except Exception:
+        keys = []
+    if keys:
+        return keys
+    single = resolve_api_key()
+    return [(single, "key1")] if single else []
+
+
 def fetch_opencode_go_quota() -> QuotaResult:
-    api_key = resolve_api_key()
-    if not api_key:
+    entries = _pool_entries()
+    if not entries:
         return build_unavailable(_PROVIDER_ID, "no-credentials")
-    return fetch_usage(api_key)
+
+    # Every key costs the flaky endpoint its own retries; with round-robin
+    # pools the sweep budget (20s) is shared across providers, so scale the
+    # per-key attempt count down as the pool grows.
+    attempts = _RETRY_ATTEMPTS if len(entries) == 1 else max(2, _RETRY_ATTEMPTS - len(entries) + 2)
+    windows: list[QuotaWindow] = []
+    plan: Optional[str] = None
+    failed: list[str] = []
+    for token, label in entries:
+        res = fetch_usage(token, attempts=attempts)
+        if res.unavailable_reason:
+            failed.append(f"{label}: {res.unavailable_reason}")
+            continue
+        plan = plan or res.plan
+        for w in res.windows:
+            # The key rides in the window label, so the existing cache schema
+            # and widget bars carry one bar per (window, key) with no other
+            # change anywhere.
+            windows.append(QuotaWindow(label=f"{w.label} · {label}", used_percent=w.used_percent, reset_at=w.reset_at))
+    if not windows:
+        return build_unavailable(_PROVIDER_ID, "no-data", details=failed or None)
+    return QuotaResult(label=_PROVIDER_ID, windows=windows, plan=plan, unavailable_reason=None, details=failed or None)
 
 
 from .registry import register as _register  # noqa: E402
